@@ -175,6 +175,11 @@ export function replaceAllItems(serverItems) {
   }
 }
 
+/** Delete all checked items from a specific list. */
+export function clearCheckedItems(listType) {
+  db.runSync("DELETE FROM items WHERE listType = ? AND checked = 1", [listType]);
+}
+
 // ---------------------------------------------------------------------------
 // Action Diary (sync queue)
 // ---------------------------------------------------------------------------

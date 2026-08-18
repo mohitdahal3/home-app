@@ -1,20 +1,19 @@
 const fs = require("fs");
 const path = require("path");
-const { parse } = require("csv-parse/sync");
 const { WebSocketServer } = require("ws");
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 8080;
-const USERS_CSV_PATH = path.join(__dirname, "users.csv");
+const USERS_JSON_PATH = path.join(__dirname, "users.json");
 
 // ---------------------------------------------------------------------------
 // In-Memory State
 // ---------------------------------------------------------------------------
 
 // Master grocery list keyed by a unique ID.
-// Each entry: { id, text, checked, addedBy, checkedBy, createdAt }
+// Each entry: { id, text, checked, addedBy, checkedBy, listType, createdAt, checkedAt }
 const masterList = new Map();
 
 // Monotonically increasing ID counter (simple for in-memory mode).
@@ -24,21 +23,26 @@ let nextId = 1;
 const clients = new Map();
 
 // ---------------------------------------------------------------------------
-// CSV Auth Helpers
+// JSON Auth Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Read users.csv and return an array of { username, passcode } objects.
- * Re-reads the file on every call so you can hot-edit the CSV without
+ * Read users.json and return an array of { username, passcode } objects.
+ * Re-reads the file on every call so you can hot-edit the JSON without
  * restarting the server.
  */
 function loadUsers() {
-  const csv = fs.readFileSync(USERS_CSV_PATH, "utf-8");
-  return parse(csv, { columns: true, skip_empty_lines: true, trim: true });
+  try {
+    const raw = fs.readFileSync(USERS_JSON_PATH, "utf-8");
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("[Auth] Failed to read users.json:", err.message);
+    return [];
+  }
 }
 
 /**
- * Validate a passcode against the CSV.
+ * Validate a passcode against users.json.
  * Returns the username string if valid, or null if not.
  */
 function authenticate(passcode) {
@@ -55,11 +59,13 @@ function authenticate(passcode) {
  * Process a batch of actions from a client's diary queue.
  *
  * Each action is an object:
- *   { type: "ADD" | "CHECK", text?: string, itemId?: string,
- *     timestamp: number, username: string, listType?: "group" | "personal" }
+ *   { type: "ADD" | "CHECK" | "UNCHECK" | "DELETE", text?: string,
+ *     itemId?: string, timestamp: number, username: string,
+ *     listType?: "group" | <username> }
  *
  * Actions are sorted by timestamp before processing so that concurrent
- * offline edits resolve deterministically.
+ * offline edits from multiple devices resolve deterministically
+ * (Last-Write-Wins based on exact timestamps).
  */
 function processDiary(actions) {
   // Sort by timestamp (oldest first) for deterministic replay.
@@ -72,6 +78,9 @@ function processDiary(actions) {
         break;
       case "CHECK":
         handleCheck(action);
+        break;
+      case "UNCHECK":
+        handleUncheck(action);
         break;
       case "DELETE":
         handleDelete(action);
@@ -116,75 +125,102 @@ function handleAdd(action) {
     checkedBy: null,
     listType,
     createdAt: timestamp,
+    checkedAt: null,
   });
   console.log(`  Added item ${id}: "${text}" (${listType})`);
 }
 
 /**
  * CHECK action — marks an item as checked (purchased).
- * Matches by itemId first; falls back to text match for offline-created items
- * whose server-side ID the client may not know yet.
+ * Uses Last-Write-Wins: if the action timestamp is newer than the last
+ * check/uncheck, it wins.
  */
 function handleCheck(action) {
   const { itemId, text, timestamp, username } = action;
 
-  let item = null;
-
-  // Try by ID first.
-  if (itemId && masterList.has(itemId)) {
-    item = masterList.get(itemId);
-  }
-
-  // Fallback: match by text (first unchecked occurrence).
-  if (!item && text) {
-    for (const [, entry] of masterList) {
-      if (entry.text === text && !entry.checked) {
-        item = entry;
-        break;
-      }
-    }
-  }
+  let item = findItem(itemId, text);
 
   if (item) {
-    item.checked = true;
-    item.checkedBy = username;
-    console.log(`  Checked item ${item.id}: "${item.text}" by ${username}`);
+    // Last-Write-Wins: only apply if this timestamp is newer.
+    if (!item.checkedAt || timestamp >= item.checkedAt) {
+      item.checked = true;
+      item.checkedBy = username;
+      item.checkedAt = timestamp;
+      console.log(`  Checked item ${item.id}: "${item.text}" by ${username}`);
+    } else {
+      console.log(`  CHECK skipped (older timestamp) for "${item.text}"`);
+    }
   } else {
     console.warn(`  CHECK failed — no matching item for id=${itemId} text="${text}"`);
   }
 }
 
 /**
+ * UNCHECK action — marks an item as unchecked.
+ * Uses Last-Write-Wins based on timestamp.
+ */
+function handleUncheck(action) {
+  const { itemId, text, timestamp } = action;
+
+  let item = findItem(itemId, text);
+
+  if (item) {
+    // Last-Write-Wins: only apply if this timestamp is newer.
+    if (!item.checkedAt || timestamp >= item.checkedAt) {
+      item.checked = false;
+      item.checkedBy = null;
+      item.checkedAt = timestamp;
+      console.log(`  Unchecked item ${item.id}: "${item.text}"`);
+    } else {
+      console.log(`  UNCHECK skipped (older timestamp) for "${item.text}"`);
+    }
+  } else {
+    console.warn(`  UNCHECK failed — no matching item for id=${itemId} text="${text}"`);
+  }
+}
+
+/**
  * DELETE action — removes an item from the master list entirely.
- * Matches by itemId first; falls back to text match.
  */
 function handleDelete(action) {
   const { itemId, text, username } = action;
 
-  let targetId = null;
+  let item = findItem(itemId, text);
 
+  if (item) {
+    masterList.delete(item.id);
+    console.log(`  Deleted item ${item.id}: "${item.text}" by ${username}`);
+  } else {
+    console.warn(`  DELETE failed — no matching item for id=${itemId} text="${text}"`);
+  }
+}
+
+/**
+ * Helper: find an item by ID first, then fallback to text match.
+ */
+function findItem(itemId, text) {
   // Try by ID first.
   if (itemId && masterList.has(itemId)) {
-    targetId = itemId;
+    return masterList.get(itemId);
   }
 
-  // Fallback: match by text.
-  if (!targetId && text) {
-    for (const [id, entry] of masterList) {
+  // Fallback: match by text (first unchecked occurrence, then any).
+  if (text) {
+    // Prefer unchecked match.
+    for (const [, entry] of masterList) {
+      if (entry.text === text && !entry.checked) {
+        return entry;
+      }
+    }
+    // Any match.
+    for (const [, entry] of masterList) {
       if (entry.text === text) {
-        targetId = id;
-        break;
+        return entry;
       }
     }
   }
 
-  if (targetId) {
-    const item = masterList.get(targetId);
-    masterList.delete(targetId);
-    console.log(`  Deleted item ${targetId}: "${item.text}" by ${username}`);
-  } else {
-    console.warn(`  DELETE failed — no matching item for id=${itemId} text="${text}"`);
-  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +260,7 @@ const wss = new WebSocketServer({ port: PORT });
 
 wss.on("listening", () => {
   console.log(`[Home Server] Listening on ws://localhost:${PORT}`);
+  console.log(`[Home Server] Users loaded: ${loadUsers().map((u) => u.username).join(", ")}`);
 });
 
 wss.on("connection", (ws) => {
@@ -268,7 +305,6 @@ wss.on("connection", (ws) => {
 
     // ----- DIARY FLUSH -----
     if (msg.type === "DIARY") {
-      // msg.actions is the array of queued actions from the client.
       if (!Array.isArray(msg.actions)) {
         send(ws, { type: "ERROR", message: "DIARY.actions must be an array" });
         return;
@@ -288,6 +324,23 @@ wss.on("connection", (ws) => {
     // ----- REQUEST SYNC (client wants the latest list) -----
     if (msg.type === "REQUEST_SYNC") {
       send(ws, buildSnapshot());
+      return;
+    }
+
+    // ----- CLEAR CHECKED (remove all checked items from a specific list) -----
+    if (msg.type === "CLEAR_CHECKED") {
+      const listType = msg.listType || "group";
+      let cleared = 0;
+
+      for (const [id, item] of masterList) {
+        if (item.listType === listType && item.checked) {
+          masterList.delete(id);
+          cleared++;
+        }
+      }
+
+      console.log(`[Clear] ${username} cleared ${cleared} checked items from "${listType}"`);
+      broadcastSnapshot();
       return;
     }
 

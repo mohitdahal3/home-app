@@ -14,7 +14,7 @@ import MainListScreen from "./src/screens/MainListScreen";
  *
  * Manages:
  *  - Database initialization
- *  - Session persistence (auto-login)
+ *  - Session persistence (auto-login via SQLite)
  *  - WebSocket lifecycle and message routing
  *  - Top-level screen switching (Login ↔ Main)
  */
@@ -162,6 +162,30 @@ export default function App() {
   );
 
   // ------------------------------------------------------------------
+  // 6. Logout handler
+  // ------------------------------------------------------------------
+  const handleLogout = useCallback(() => {
+    ws.disconnect();
+    db.clearSession();
+    setCurrentUser(null);
+    setPasscode(null);
+    setUsers([]);
+    setItems([]);
+    setConnected(false);
+  }, []);
+
+  // ------------------------------------------------------------------
+  // 7. Manual refresh (pull-to-refresh) — request sync from server
+  // ------------------------------------------------------------------
+  const handleManualRefresh = useCallback(() => {
+    // Request the latest snapshot from the server.
+    ws.sendMessage({ type: "REQUEST_SYNC" });
+
+    // Also flush any pending diary entries.
+    flushDiary();
+  }, [flushDiary]);
+
+  // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
 
@@ -186,6 +210,8 @@ export default function App() {
       users={users}
       items={items}
       onItemsChanged={refreshItems}
+      onLogout={handleLogout}
+      onManualRefresh={handleManualRefresh}
       connected={connected}
     />
   );

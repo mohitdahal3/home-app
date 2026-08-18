@@ -41,7 +41,7 @@ export default function AddItemModal({ visible, onClose, onAdd }) {
         {/* Stop inner taps from closing the modal */}
         <TouchableOpacity
           activeOpacity={1}
-          onPress={() => {}}
+          onPress={() => { }}
           className="w-full bg-white rounded-2xl p-6"
         >
           <Text className="text-lg font-semibold text-slate-800 mb-4">

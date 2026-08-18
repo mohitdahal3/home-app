@@ -106,9 +106,8 @@ export default function LoginScreen({ onLoginSuccess }) {
           ) : null}
 
           <TouchableOpacity
-            className={`w-full mt-5 rounded-xl py-3.5 items-center ${
-              loading ? "bg-brand-300" : "bg-brand-600"
-            }`}
+            className={`w-full mt-5 rounded-xl py-3.5 items-center ${loading ? "bg-brand-300" : "bg-brand-600"
+              }`}
             onPress={handleLogin}
             disabled={loading}
             activeOpacity={0.8}

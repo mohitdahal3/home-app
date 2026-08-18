@@ -5,6 +5,8 @@ import {
   TouchableOpacity,
   FlatList,
   ScrollView,
+  RefreshControl,
+  Alert,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 
@@ -15,9 +17,11 @@ import * as ws from "../services/websocket";
 /**
  * Main List Screen
  *
+ * - Header with logout button.
  * - Horizontal tab bar: "Group" + one tab per user from the server.
- * - Scrollable item list with checkbox & delete.
+ * - Scrollable item list with checkbox & delete + pull-to-refresh.
  * - Floating "+" button to add items.
+ * - "Clear Checked" button when checked items exist.
  * - Access control: personal lists are read-only unless you own them.
  */
 export default function MainListScreen({
@@ -25,11 +29,14 @@ export default function MainListScreen({
   users,
   items,
   onItemsChanged,
+  onLogout,
+  onManualRefresh,
   connected,
 }) {
   const tabs = ["Group", ...users];
   const [activeTab, setActiveTab] = useState("Group");
   const [showAddModal, setShowAddModal] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Determine the listType key for the active tab.
   const activeListType = activeTab === "Group" ? "group" : activeTab;
@@ -39,6 +46,9 @@ export default function MainListScreen({
 
   // Filter items for the active tab.
   const filteredItems = items.filter((item) => item.listType === activeListType);
+
+  // Count checked items for "Clear Checked" visibility.
+  const checkedCount = filteredItems.filter((item) => item.checked).length;
 
   // ---- Actions ----
 
@@ -67,12 +77,18 @@ export default function MainListScreen({
 
       if (newChecked) {
         db.checkItem(item.id, currentUser);
-        db.logAction("CHECK", { text: item.text, itemId: item.id, listType: item.listType });
+        db.logAction("CHECK", {
+          text: item.text,
+          itemId: item.id,
+          listType: item.listType,
+        });
       } else {
-        // Unchecking — re-add the item (server treats it as a new ADD).
         db.uncheckItem(item.id);
-        // We don't log an uncheck action since the server doesn't support it yet.
-        // The next sync will reconcile.
+        db.logAction("UNCHECK", {
+          text: item.text,
+          itemId: item.id,
+          listType: item.listType,
+        });
       }
 
       flushDiary();
@@ -86,12 +102,53 @@ export default function MainListScreen({
       if (!canEdit) return;
 
       db.deleteItem(item.id);
-      db.logAction("DELETE", { text: item.text, itemId: item.id, listType: item.listType });
+      db.logAction("DELETE", {
+        text: item.text,
+        itemId: item.id,
+        listType: item.listType,
+      });
       flushDiary();
       onItemsChanged();
     },
     [canEdit, onItemsChanged]
   );
+
+  const handleClearChecked = useCallback(() => {
+    if (!canEdit) return;
+
+    Alert.alert(
+      "Clear Checked Items",
+      `Remove ${checkedCount} checked item${checkedCount !== 1 ? "s" : ""} from this list?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Clear",
+          style: "destructive",
+          onPress: () => {
+            // Clear locally.
+            db.clearCheckedItems(activeListType);
+
+            // Tell the server to clear too.
+            ws.sendMessage({
+              type: "CLEAR_CHECKED",
+              listType: activeListType,
+            });
+
+            onItemsChanged();
+          },
+        },
+      ]
+    );
+  }, [canEdit, checkedCount, activeListType, onItemsChanged]);
+
+  // ---- Pull to Refresh ----
+
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    onManualRefresh();
+    // Stop the spinner after a short delay (server SYNC will update data).
+    setTimeout(() => setRefreshing(false), 1500);
+  }, [onManualRefresh]);
 
   // ---- Sync ----
 
@@ -121,9 +178,8 @@ export default function MainListScreen({
   const renderItem = useCallback(
     ({ item }) => (
       <View
-        className={`flex-row items-center bg-white rounded-xl mx-4 mb-2.5 px-4 py-3.5 ${
-          item.checked ? "opacity-50" : ""
-        }`}
+        className={`flex-row items-center bg-white rounded-xl mx-4 mb-2.5 px-4 py-3.5 ${item.checked ? "opacity-50" : ""
+          }`}
         style={{
           shadowColor: "#000",
           shadowOffset: { width: 0, height: 1 },
@@ -136,11 +192,10 @@ export default function MainListScreen({
         {canEdit ? (
           <TouchableOpacity
             onPress={() => handleCheck(item)}
-            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${
-              item.checked
+            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${item.checked
                 ? "bg-emerald-500 border-emerald-500"
                 : "border-slate-300"
-            }`}
+              }`}
             activeOpacity={0.7}
           >
             {item.checked ? (
@@ -150,11 +205,10 @@ export default function MainListScreen({
         ) : (
           // Read-only indicator for non-owners
           <View
-            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${
-              item.checked
+            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${item.checked
                 ? "bg-emerald-500 border-emerald-500"
                 : "border-slate-200 bg-slate-50"
-            }`}
+              }`}
           >
             {item.checked ? (
               <Text className="text-white text-xs font-bold">✓</Text>
@@ -164,11 +218,10 @@ export default function MainListScreen({
 
         {/* Item text */}
         <Text
-          className={`flex-1 text-base ${
-            item.checked
+          className={`flex-1 text-base ${item.checked
               ? "text-slate-400 line-through"
               : "text-slate-800"
-          }`}
+            }`}
           numberOfLines={2}
         >
           {item.text}
@@ -195,17 +248,26 @@ export default function MainListScreen({
 
       {/* ---- Header ---- */}
       <View className="bg-white pt-14 pb-3 px-5 border-b border-slate-100">
-        <Text className="text-3xl font-bold text-brand-600 tracking-tight">
-          Home
-        </Text>
         <View className="flex-row items-center justify-between">
+          <Text className="text-3xl font-bold text-brand-600 tracking-tight">
+            Home
+          </Text>
+          {/* Logout button */}
+          <TouchableOpacity
+            onPress={onLogout}
+            className="px-3 py-1.5 rounded-lg bg-slate-100"
+            activeOpacity={0.7}
+          >
+            <Text className="text-sm font-medium text-slate-500">Logout</Text>
+          </TouchableOpacity>
+        </View>
+        <View className="flex-row items-center justify-between mt-0.5">
           <Text className="text-sm text-slate-400">Our Shopping List</Text>
           {/* Connection indicator */}
           <View className="flex-row items-center">
             <View
-              className={`w-2 h-2 rounded-full mr-1.5 ${
-                connected ? "bg-emerald-400" : "bg-red-400"
-              }`}
+              className={`w-2 h-2 rounded-full mr-1.5 ${connected ? "bg-emerald-400" : "bg-red-400"
+                }`}
             />
             <Text className="text-xs text-slate-400">
               {connected ? "Synced" : "Offline"}
@@ -227,15 +289,13 @@ export default function MainListScreen({
               <TouchableOpacity
                 key={tab}
                 onPress={() => setActiveTab(tab)}
-                className={`px-4 py-2 rounded-full mr-2 ${
-                  isActive ? "bg-brand-600" : "bg-slate-100"
-                }`}
+                className={`px-4 py-2 rounded-full mr-2 ${isActive ? "bg-brand-600" : "bg-slate-100"
+                  }`}
                 activeOpacity={0.7}
               >
                 <Text
-                  className={`text-sm font-medium ${
-                    isActive ? "text-white" : "text-slate-500"
-                  }`}
+                  className={`text-sm font-medium ${isActive ? "text-white" : "text-slate-500"
+                    }`}
                 >
                   {tab}
                 </Text>
@@ -245,12 +305,33 @@ export default function MainListScreen({
         </ScrollView>
       </View>
 
-      {/* ---- Item List ---- */}
+      {/* ---- Clear Checked Bar (only when there are checked items & user can edit) ---- */}
+      {canEdit && checkedCount > 0 ? (
+        <TouchableOpacity
+          onPress={handleClearChecked}
+          className="flex-row items-center justify-center bg-red-50 py-2.5 mx-4 mt-3 rounded-xl"
+          activeOpacity={0.7}
+        >
+          <Text className="text-red-500 text-sm font-medium">
+            🗑 Clear {checkedCount} checked item{checkedCount !== 1 ? "s" : ""}
+          </Text>
+        </TouchableOpacity>
+      ) : null}
+
+      {/* ---- Item List with Pull-to-Refresh ---- */}
       <FlatList
         data={filteredItems}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         contentContainerStyle={{ paddingTop: 12, paddingBottom: 100 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor="#6366F1"
+            colors={["#6366F1"]}
+          />
+        }
         ListEmptyComponent={
           <View className="items-center mt-20">
             <Text className="text-5xl mb-3">🛒</Text>
