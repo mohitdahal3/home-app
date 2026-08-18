@@ -22,6 +22,7 @@ import * as ws from "../services/websocket";
  * - Scrollable item list with checkbox & delete + pull-to-refresh.
  * - Floating "+" button to add items.
  * - "Clear Checked" button when checked items exist.
+ * - Item attribution ("Added by X") on the Group tab.
  * - Access control: personal lists are read-only unless you own them.
  */
 export default function MainListScreen({
@@ -43,6 +44,9 @@ export default function MainListScreen({
 
   // Access control: can this user interact with the active list?
   const canEdit = activeTab === "Group" || activeTab === currentUser;
+
+  // Whether to show "Added by X" attribution (only on Group tab).
+  const showAttribution = activeListType === "group";
 
   // Filter items for the active tab.
   const filteredItems = items.filter((item) => item.listType === activeListType);
@@ -114,7 +118,7 @@ export default function MainListScreen({
   );
 
   const handleClearChecked = useCallback(() => {
-    if (!canEdit) return;
+    if (!canEdit || checkedCount === 0) return;
 
     Alert.alert(
       "Clear Checked Items",
@@ -125,15 +129,29 @@ export default function MainListScreen({
           text: "Clear",
           style: "destructive",
           onPress: () => {
-            // Clear locally.
+            // Read the current checked items from the DB (not React state)
+            // to ensure we have the latest data at the moment of confirmation.
+            const itemsToClear = db
+              .getItems(activeListType)
+              .filter((i) => i.checked);
+
+            // Log individual DELETE diary entries for each item.
+            // This ensures offline safety: if the client is offline, these
+            // diary entries flush on the next connection, and the server's
+            // tombstone system prevents ghost re-adds from other offline phones.
+            for (const item of itemsToClear) {
+              db.logAction("DELETE", {
+                text: item.text,
+                itemId: item.id,
+                listType: item.listType,
+              });
+            }
+
+            // Clear locally in one efficient batch.
             db.clearCheckedItems(activeListType);
 
-            // Tell the server to clear too.
-            ws.sendMessage({
-              type: "CLEAR_CHECKED",
-              listType: activeListType,
-            });
-
+            // Flush diary to server.
+            flushDiary();
             onItemsChanged();
           },
         },
@@ -158,6 +176,7 @@ export default function MainListScreen({
 
     const sent = ws.sendMessage({
       type: "DIARY",
+      clientTime: Date.now(), // Server uses this for clock drift correction.
       actions: pending.map((a) => ({
         type: a.type,
         text: a.text,
@@ -178,8 +197,9 @@ export default function MainListScreen({
   const renderItem = useCallback(
     ({ item }) => (
       <View
-        className={`flex-row items-center bg-white rounded-xl mx-4 mb-2.5 px-4 py-3.5 ${item.checked ? "opacity-50" : ""
-          }`}
+        className={`flex-row items-center bg-white rounded-xl mx-4 mb-2.5 px-4 py-3.5 ${
+          item.checked ? "opacity-50" : ""
+        }`}
         style={{
           shadowColor: "#000",
           shadowOffset: { width: 0, height: 1 },
@@ -192,10 +212,11 @@ export default function MainListScreen({
         {canEdit ? (
           <TouchableOpacity
             onPress={() => handleCheck(item)}
-            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${item.checked
+            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${
+              item.checked
                 ? "bg-emerald-500 border-emerald-500"
                 : "border-slate-300"
-              }`}
+            }`}
             activeOpacity={0.7}
           >
             {item.checked ? (
@@ -205,10 +226,11 @@ export default function MainListScreen({
         ) : (
           // Read-only indicator for non-owners
           <View
-            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${item.checked
+            className={`w-6 h-6 rounded-md border-2 items-center justify-center mr-3 ${
+              item.checked
                 ? "bg-emerald-500 border-emerald-500"
                 : "border-slate-200 bg-slate-50"
-              }`}
+            }`}
           >
             {item.checked ? (
               <Text className="text-white text-xs font-bold">✓</Text>
@@ -216,16 +238,25 @@ export default function MainListScreen({
           </View>
         )}
 
-        {/* Item text */}
-        <Text
-          className={`flex-1 text-base ${item.checked
-              ? "text-slate-400 line-through"
-              : "text-slate-800"
+        {/* Item text + attribution */}
+        <View className="flex-1">
+          <Text
+            className={`text-base ${
+              item.checked
+                ? "text-slate-400 line-through"
+                : "text-slate-800"
             }`}
-          numberOfLines={2}
-        >
-          {item.text}
-        </Text>
+            numberOfLines={2}
+          >
+            {item.text}
+          </Text>
+          {/* Show "Added by X" on the Group tab */}
+          {showAttribution && item.addedBy ? (
+            <Text className="text-xs text-slate-400 mt-0.5">
+              Added by {item.addedBy}
+            </Text>
+          ) : null}
+        </View>
 
         {/* Delete button — only for list owners */}
         {canEdit ? (
@@ -239,7 +270,7 @@ export default function MainListScreen({
         ) : null}
       </View>
     ),
-    [canEdit, handleCheck, handleDelete]
+    [canEdit, showAttribution, handleCheck, handleDelete]
   );
 
   return (
@@ -266,8 +297,9 @@ export default function MainListScreen({
           {/* Connection indicator */}
           <View className="flex-row items-center">
             <View
-              className={`w-2 h-2 rounded-full mr-1.5 ${connected ? "bg-emerald-400" : "bg-red-400"
-                }`}
+              className={`w-2 h-2 rounded-full mr-1.5 ${
+                connected ? "bg-emerald-400" : "bg-red-400"
+              }`}
             />
             <Text className="text-xs text-slate-400">
               {connected ? "Synced" : "Offline"}
@@ -289,13 +321,15 @@ export default function MainListScreen({
               <TouchableOpacity
                 key={tab}
                 onPress={() => setActiveTab(tab)}
-                className={`px-4 py-2 rounded-full mr-2 ${isActive ? "bg-brand-600" : "bg-slate-100"
-                  }`}
+                className={`px-4 py-2 rounded-full mr-2 ${
+                  isActive ? "bg-brand-600" : "bg-slate-100"
+                }`}
                 activeOpacity={0.7}
               >
                 <Text
-                  className={`text-sm font-medium ${isActive ? "text-white" : "text-slate-500"
-                    }`}
+                  className={`text-sm font-medium ${
+                    isActive ? "text-white" : "text-slate-500"
+                  }`}
                 >
                   {tab}
                 </Text>

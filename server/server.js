@@ -8,6 +8,9 @@ const { WebSocketServer } = require("ws");
 const PORT = process.env.PORT || 8080;
 const USERS_JSON_PATH = path.join(__dirname, "users.json");
 
+// Tombstone lifetime: 24 hours. After this, tombstones are garbage-collected.
+const TOMBSTONE_TTL = 24 * 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // In-Memory State
 // ---------------------------------------------------------------------------
@@ -21,6 +24,10 @@ let nextId = 1;
 
 // Connected & authenticated clients. Map<WebSocket, { username }>
 const clients = new Map();
+
+// Tombstones: prevents offline clients from resurrecting deleted items.
+// Key: "text|listType", Value: server-time timestamp when the item was deleted.
+const tombstones = new Map();
 
 // ---------------------------------------------------------------------------
 // JSON Auth Helpers
@@ -52,20 +59,70 @@ function authenticate(passcode) {
 }
 
 // ---------------------------------------------------------------------------
+// Tombstone Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Record that an item with the given text+listType was deleted at server-time.
+ * This prevents stale ADD actions from resurrecting the item.
+ */
+function addTombstone(text, listType) {
+  tombstones.set(`${text}|${listType}`, Date.now());
+}
+
+/**
+ * Check if an ADD action should be rejected because the item was deleted
+ * more recently than the action's (server-adjusted) timestamp.
+ *
+ * If the ADD is newer than the tombstone, the tombstone is cleared
+ * (the user genuinely re-added the item after deletion).
+ */
+function isTombstoned(text, listType, adjustedTimestamp) {
+  const key = `${text}|${listType}`;
+  const deletedAt = tombstones.get(key);
+  if (deletedAt === undefined) return false;
+
+  if (adjustedTimestamp < deletedAt) {
+    // The ADD happened before the deletion — it's a ghost. Reject it.
+    return true;
+  }
+
+  // The ADD happened after the deletion — user genuinely re-added. Allow it.
+  tombstones.delete(key);
+  return false;
+}
+
+/** Remove tombstones older than TOMBSTONE_TTL. */
+function cleanupTombstones() {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [key, deletedAt] of tombstones) {
+    if (now - deletedAt > TOMBSTONE_TTL) {
+      tombstones.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[Tombstones] Cleaned ${cleaned} stale tombstone(s)`);
+  }
+}
+
+// Garbage-collect old tombstones every hour.
+setInterval(cleanupTombstones, 60 * 60 * 1000);
+
+// ---------------------------------------------------------------------------
 // Action Diary Processing
 // ---------------------------------------------------------------------------
 
 /**
  * Process a batch of actions from a client's diary queue.
  *
- * Each action is an object:
- *   { type: "ADD" | "CHECK" | "UNCHECK" | "DELETE", text?: string,
- *     itemId?: string, timestamp: number, username: string,
- *     listType?: "group" | <username> }
+ * IMPORTANT: All timestamps should already be adjusted for client clock
+ * drift before calling this function.
  *
  * Actions are sorted by timestamp before processing so that concurrent
  * offline edits from multiple devices resolve deterministically
- * (Last-Write-Wins based on exact timestamps).
+ * (Last-Write-Wins based on server-adjusted timestamps).
  */
 function processDiary(actions) {
   // Sort by timestamp (oldest first) for deterministic replay.
@@ -95,12 +152,20 @@ function processDiary(actions) {
  * ADD action — creates a new item OR merges with an existing item that has
  * the exact same text (case-sensitive) AND the same listType.
  *
+ * Checks tombstones first to prevent ghost data from offline clients.
+ *
  * Duplicate rule from CLAUDE.md:
  *   "If two users add the exact same string, the server merges them into a
  *    single item with one ID."
  */
 function handleAdd(action) {
   const { text, timestamp, username, listType = "group" } = action;
+
+  // Ghost data check: reject if this item was deleted more recently.
+  if (isTombstoned(text, listType, timestamp)) {
+    console.log(`  Rejected stale ADD "${text}" (tombstoned)`);
+    return;
+  }
 
   // Search for an existing un-checked item with identical text + listType.
   for (const [, item] of masterList) {
@@ -132,13 +197,13 @@ function handleAdd(action) {
 
 /**
  * CHECK action — marks an item as checked (purchased).
- * Uses Last-Write-Wins: if the action timestamp is newer than the last
- * check/uncheck, it wins.
+ * Uses Last-Write-Wins: only applies if the action's server-adjusted
+ * timestamp is >= the item's last checkedAt.
  */
 function handleCheck(action) {
   const { itemId, text, timestamp, username } = action;
 
-  let item = findItem(itemId, text);
+  const item = findItem(itemId, text);
 
   if (item) {
     // Last-Write-Wins: only apply if this timestamp is newer.
@@ -157,12 +222,12 @@ function handleCheck(action) {
 
 /**
  * UNCHECK action — marks an item as unchecked.
- * Uses Last-Write-Wins based on timestamp.
+ * Uses Last-Write-Wins based on server-adjusted timestamp.
  */
 function handleUncheck(action) {
   const { itemId, text, timestamp } = action;
 
-  let item = findItem(itemId, text);
+  const item = findItem(itemId, text);
 
   if (item) {
     // Last-Write-Wins: only apply if this timestamp is newer.
@@ -180,14 +245,16 @@ function handleUncheck(action) {
 }
 
 /**
- * DELETE action — removes an item from the master list entirely.
+ * DELETE action — removes an item from the master list and creates a
+ * tombstone to prevent ghost re-adds from offline clients.
  */
 function handleDelete(action) {
   const { itemId, text, username } = action;
 
-  let item = findItem(itemId, text);
+  const item = findItem(itemId, text);
 
   if (item) {
+    addTombstone(item.text, item.listType);
     masterList.delete(item.id);
     console.log(`  Deleted item ${item.id}: "${item.text}" by ${username}`);
   } else {
@@ -303,7 +370,7 @@ wss.on("connection", (ws) => {
 
     const { username } = clients.get(ws);
 
-    // ----- DIARY FLUSH -----
+    // ----- DIARY FLUSH (with clock drift correction) -----
     if (msg.type === "DIARY") {
       if (!Array.isArray(msg.actions)) {
         send(ws, { type: "ERROR", message: "DIARY.actions must be an array" });
@@ -312,9 +379,27 @@ wss.on("connection", (ws) => {
 
       console.log(`[Diary] Received ${msg.actions.length} action(s) from ${username}`);
 
-      // Tag each action with the authenticated username for safety.
-      const tagged = msg.actions.map((a) => ({ ...a, username }));
-      processDiary(tagged);
+      // --- Clock drift correction ---
+      // The client includes its local Date.now() as msg.clientTime.
+      // We compute the offset between server and client clocks, then
+      // adjust all action timestamps so LWW comparisons use server time.
+      // This prevents a phone with a fast/slow clock from winning unfairly.
+      const serverNow = Date.now();
+      const clientTime = msg.clientTime || serverNow; // fallback if missing
+      const clockOffset = serverNow - clientTime;
+
+      if (Math.abs(clockOffset) > 2000) {
+        console.log(`[Clock] ${username} drift: ${clockOffset > 0 ? "+" : ""}${clockOffset}ms`);
+      }
+
+      // Tag each action with the username and adjust timestamps.
+      const adjusted = msg.actions.map((a) => ({
+        ...a,
+        username,
+        timestamp: a.timestamp + clockOffset,
+      }));
+
+      processDiary(adjusted);
 
       // After processing, broadcast the updated list to everyone.
       broadcastSnapshot();
@@ -327,13 +412,14 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // ----- CLEAR CHECKED (remove all checked items from a specific list) -----
+    // ----- CLEAR CHECKED (batch-remove all checked items from a list) -----
     if (msg.type === "CLEAR_CHECKED") {
       const listType = msg.listType || "group";
       let cleared = 0;
 
       for (const [id, item] of masterList) {
         if (item.listType === listType && item.checked) {
+          addTombstone(item.text, item.listType);
           masterList.delete(id);
           cleared++;
         }

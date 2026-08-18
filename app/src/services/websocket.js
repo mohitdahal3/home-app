@@ -2,6 +2,9 @@ import { SERVER_URL } from "../config";
 
 // ---------------------------------------------------------------------------
 // WebSocket client service
+//
+// Handles connection lifecycle, automatic reconnection with exponential
+// backoff + jitter, and message routing.
 // ---------------------------------------------------------------------------
 
 let ws = null;
@@ -10,8 +13,26 @@ let onStatusChange = null;
 let reconnectTimer = null;
 let shouldReconnect = true;
 
+// Exponential backoff state.
+let reconnectAttempts = 0;
+const BASE_DELAY = 1000;   // 1 second
+const MAX_DELAY = 30000;   // 30 seconds cap
+
+/**
+ * Calculate the next reconnect delay using exponential backoff with jitter.
+ * Sequence: 1s → 2s → 4s → 8s → 16s → 30s (capped).
+ * Adds 0–20% random jitter to prevent thundering herd when the server
+ * restarts and all 4 phones try to reconnect simultaneously.
+ */
+function getReconnectDelay() {
+  const exponential = Math.min(BASE_DELAY * Math.pow(2, reconnectAttempts), MAX_DELAY);
+  const jitter = exponential * 0.2 * Math.random();
+  return Math.round(exponential + jitter);
+}
+
 /**
  * Register a callback for incoming server messages.
+ * Replaces any previously registered handler (no listener accumulation).
  * @param {(msg: object) => void} handler
  */
 export function setMessageHandler(handler) {
@@ -20,6 +41,7 @@ export function setMessageHandler(handler) {
 
 /**
  * Register a callback for connection status changes.
+ * Replaces any previously registered handler (no listener accumulation).
  * @param {(connected: boolean) => void} handler
  */
 export function setStatusHandler(handler) {
@@ -28,7 +50,7 @@ export function setStatusHandler(handler) {
 
 /**
  * Connect to the WebSocket server.
- * Automatically attempts to reconnect on disconnect.
+ * Automatically attempts to reconnect on disconnect with exponential backoff.
  */
 export function connect() {
   // Prevent duplicate connections.
@@ -49,6 +71,7 @@ export function connect() {
 
   ws.onopen = () => {
     console.log("[WS] Connected to", SERVER_URL);
+    reconnectAttempts = 0; // Reset backoff on successful connection.
     if (onStatusChange) onStatusChange(true);
   };
 
@@ -82,10 +105,14 @@ export function sendMessage(msg) {
   return false;
 }
 
-/** Disconnect and stop reconnecting. */
+/**
+ * Disconnect and stop reconnecting.
+ * Also resets backoff counter so the next connect() starts fresh.
+ */
 export function disconnect() {
   shouldReconnect = false;
   clearTimeout(reconnectTimer);
+  reconnectAttempts = 0;
   if (ws) {
     ws.close();
     ws = null;
@@ -104,8 +131,12 @@ export function isConnected() {
 function scheduleReconnect() {
   if (!shouldReconnect) return;
   clearTimeout(reconnectTimer);
+
+  const delay = getReconnectDelay();
+  reconnectAttempts++;
+
+  console.log(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
   reconnectTimer = setTimeout(() => {
-    console.log("[WS] Attempting reconnect...");
     connect();
-  }, 5000); // Reconnect every 5 seconds.
+  }, delay);
 }

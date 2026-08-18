@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   Text,
@@ -27,6 +27,9 @@ export default function LoginScreen({ onLoginSuccess }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Ref to track the timeout so we can clear it on auth response.
+  const timeoutRef = useRef(null);
+
   const handleLogin = () => {
     const trimmed = code.trim();
     if (!trimmed) {
@@ -37,14 +40,24 @@ export default function LoginScreen({ onLoginSuccess }) {
     setError("");
     setLoading(true);
 
+    // Clear any previous timeout from a prior login attempt.
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+
     // Set up a one-time message handler for the auth response.
     ws.setMessageHandler((msg) => {
+      // Auth response received — cancel the timeout.
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+
       if (msg.type === "AUTH_OK") {
         setLoading(false);
         onLoginSuccess(msg.username, trimmed, msg.users || []);
       } else if (msg.type === "AUTH_FAIL") {
         setLoading(false);
         setError(msg.message || "Invalid login code.");
+        ws.disconnect();
       }
     });
 
@@ -57,12 +70,14 @@ export default function LoginScreen({ onLoginSuccess }) {
 
     ws.connect();
 
-    // Timeout if server is unreachable.
-    setTimeout(() => {
-      if (loading) {
-        setLoading(false);
-        setError("Could not reach the server. Try again later.");
-      }
+    // Timeout if server is unreachable after 10 seconds.
+    // Uses a ref instead of relying on the `loading` state value
+    // (which would be stale inside the setTimeout closure).
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null;
+      setLoading(false);
+      setError("Could not reach the server. Try again later.");
+      ws.disconnect();
     }, 10000);
   };
 
@@ -106,8 +121,9 @@ export default function LoginScreen({ onLoginSuccess }) {
           ) : null}
 
           <TouchableOpacity
-            className={`w-full mt-5 rounded-xl py-3.5 items-center ${loading ? "bg-brand-300" : "bg-brand-600"
-              }`}
+            className={`w-full mt-5 rounded-xl py-3.5 items-center ${
+              loading ? "bg-brand-300" : "bg-brand-600"
+            }`}
             onPress={handleLogin}
             disabled={loading}
             activeOpacity={0.8}

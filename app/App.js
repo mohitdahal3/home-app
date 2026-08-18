@@ -117,6 +117,7 @@ export default function App() {
 
     const sent = ws.sendMessage({
       type: "DIARY",
+      clientTime: Date.now(), // Server uses this for clock drift correction.
       actions: pending.map((a) => ({
         type: a.type,
         text: a.text,
