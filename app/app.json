@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "app",
+    "name": "Home",
     "slug": "app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -15,13 +15,19 @@
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "package": "com.mdahal03.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-sqlite"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "514a9a16-329d-4034-a4cc-0417f732629e"
+      }
+    }
   }
 }

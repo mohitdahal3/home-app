@@ -9,4 +9,4 @@
 //   wss://home.yourdomain.com   (production via Cloudflare Tunnel)
 // ---------------------------------------------------------------------------
 
-export const SERVER_URL = "ws://192.168.1.145:8080";
+export const SERVER_URL = "wss://home.mohitdahal.com";
