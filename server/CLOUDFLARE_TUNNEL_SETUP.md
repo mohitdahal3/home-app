@@ -69,10 +69,10 @@ Paste this (replace the placeholders):
 
 ```yaml
 tunnel: <TUNNEL-UUID>
-credentials-file: /home/<YOUR-USERNAME>/.cloudflared/<TUNNEL-UUID>.json
+credentials-file: /home/mohitdahal3/.cloudflared/<TUNNEL-UUID>.json
 
 ingress:
-  - hostname: home.yourdomain.com
+  - hostname: home.mohitdahal.com
     service: http://localhost:8080
   - service: http_status:404
 ```
@@ -85,10 +85,10 @@ ingress:
 ## Step 5 — Create DNS Route
 
 ```bash
-cloudflared tunnel route dns home-server home.yourdomain.com
+cloudflared tunnel route dns home-server home.mohitdahal.com
 ```
 
-This creates a CNAME record pointing `home.yourdomain.com` → your tunnel.
+This creates a CNAME record pointing `home.mohitdahal.com` → your tunnel.
 
 ---
 
@@ -98,11 +98,11 @@ This creates a CNAME record pointing `home.yourdomain.com` → your tunnel.
 cloudflared tunnel run home-server
 ```
 
-Your server should now be reachable at `wss://home.yourdomain.com`. Test with:
+Your server should now be reachable at `wss://home.mohitdahal.com`. Test with:
 
 ```bash
 # In another terminal
-npx -y wscat -c wss://home.yourdomain.com
+npx -y wscat -c wss://home.mohitdahal.com
 ```
 
 Press `Ctrl+C` to stop the manual tunnel once confirmed working.
@@ -153,8 +153,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=<YOUR-USERNAME>
-WorkingDirectory=/home/<YOUR-USERNAME>/Projects/Home App Root/server
+User=mohitdahal3
+WorkingDirectory=/home/mohitdahal3/Projects/Home App Root/server
 ExecStart=/usr/bin/node server.js
 Restart=on-failure
 RestartSec=5
@@ -194,7 +194,7 @@ sudo systemctl status home-server
 Once everything is running, your React Native app connects to:
 
 ```
-wss://home.yourdomain.com
+wss://home.mohitdahal.com
 ```
 
 Cloudflare handles TLS automatically — no cert management needed on your end.

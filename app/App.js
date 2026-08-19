@@ -1,7 +1,7 @@
 import "./global.css";
 
 import React, { useState, useEffect, useCallback } from "react";
-import { View, ActivityIndicator } from "react-native";
+import { View, ActivityIndicator, AppState } from "react-native";
 
 import * as db from "./src/db/database";
 import * as ws from "./src/services/websocket";
@@ -101,6 +101,7 @@ export default function App() {
       }
     });
 
+    setConnected(ws.isConnected());
     ws.connect();
 
     return () => {
@@ -131,6 +132,26 @@ export default function App() {
       db.clearActionQueue();
     }
   }, []);
+
+  // ------------------------------------------------------------------
+  // 3.5 Auto-update when app comes to foreground
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextAppState) => {
+      if (nextAppState === "active") {
+        if (ws.isConnected()) {
+          ws.sendMessage({ type: "REQUEST_SYNC" });
+          flushDiary();
+        } else if (passcode) {
+          ws.connect();
+        }
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [passcode, flushDiary]);
 
   // ------------------------------------------------------------------
   // 4. Callback for child screens to trigger a re-read from local DB
